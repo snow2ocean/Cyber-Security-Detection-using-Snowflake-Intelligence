@@ -10,7 +10,6 @@ Someone is trying to exfiltate data from a Snowflake account. However they are t
 
 
 ### Prerequisites
-
 Before deploying this challenge, ensure you have:
 
 1. **Snowflake Account** with access to:
