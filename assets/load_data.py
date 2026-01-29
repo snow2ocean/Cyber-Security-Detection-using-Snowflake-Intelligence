@@ -30,8 +30,8 @@ def load_ctf_data(session: Session) -> str:
     """
     
     # GitHub raw URLs for the CSV files
-    network_logs_url = "https://raw.githubusercontent.com/Snowflake-Labs/si-cybersecurity-challenge/main/data/network_logs.csv"
-    query_logs_url = "https://raw.githubusercontent.com/Snowflake-Labs/si-cybersecurity-challenge/main/data/query_logs.csv"
+    network_logs_url = "https://raw.githubusercontent.com/snow2ocean/Cyber-Security-Detection-using-Snowflake-Intelligence/main/data/network_logs.csv"
+    query_logs_url = "https://raw.githubusercontent.com/snow2ocean/Cyber-Security-Detection-using-Snowflake-Intelligence/main/data/query_logs.csv"
     
     results = []
     
