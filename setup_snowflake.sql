@@ -1,98 +1,143 @@
 -- ========================================
--- Snowflake CTF Data Ingestion Script
+-- Parameterize objects for reusability
 -- ========================================
--- This script loads data from GitHub using an optimized Python stored procedure
--- Copy and paste this entire script into Snowflake Worksheets
+SET v_db            = 'SI_CYBERSECURITY_DB';
+SET v_schema        = 'PUBLIC';
+SET v_wh            = 'SI_CYBERSECURITY_WH';
+SET v_role          = 'SI_CYBERSECURITY_ROLE';
+SET v_nr            = 'SI_CYBERSECURITY_GITHUB_NR';
+SET v_eai           = 'SI_CYBERSECURITY_GITHUB_EAI';
+SET v_secret_name   = 'SI_GITHUB_PAT';                  -- optional (for private repos / rate limits)
+SET v_user          = (SELECT CURRENT_USER());
 
+-- Hosts for GitHub access (raw content + API)
+-- SET v_hosts         = ARRAY_CONSTRUCT('raw.githubusercontent.com', 'api.github.com');
+
+
+-- ========================================
+-- STEP 0: Bootstrap (DB/WH)
+-- ========================================
+USE ROLE SYSADMIN;
+
+CREATE DATABASE IF NOT EXISTS IDENTIFIER($v_db)
+  COMMENT = 'CTF Intelligence Database';
+
+CREATE WAREHOUSE IF NOT EXISTS IDENTIFIER($v_wh)
+  WAREHOUSE_SIZE = 'X-SMALL'
+  AUTO_SUSPEND = 60
+  AUTO_RESUME = TRUE
+  INITIALLY_SUSPENDED = TRUE
+  COMMENT = 'Warehouse for CTF data operations';
+
+-- ========================================
+-- STEP 1: Role & Privileges
+-- ========================================
+USE ROLE SECURITYADMIN;
+
+CREATE ROLE IF NOT EXISTS IDENTIFIER($v_role);
+
+-- grant the runtime role to current user (for immediate use)
+GRANT ROLE IDENTIFIER($v_role) TO USER IDENTIFIER($v_user);
+
+-- give the role ownership of DB & PUBLIC schema (single owner)
+GRANT OWNERSHIP ON DATABASE IDENTIFIER($v_db)           TO ROLE IDENTIFIER($v_role);
+USE DATABASE IDENTIFIER($v_db);
+GRANT OWNERSHIP ON SCHEMA   IDENTIFIER($v_schema) TO ROLE IDENTIFIER($v_role);
+
+-- warehouse usage
+GRANT USAGE ON WAREHOUSE IDENTIFIER($v_wh)              TO ROLE IDENTIFIER($v_role);
+
+-- account-level privilege needed to create integrations
 USE ROLE ACCOUNTADMIN;
+GRANT CREATE INTEGRATION ON ACCOUNT TO ROLE IDENTIFIER($v_role);  -- required for creating EXTERNAL ACCESS INTEGRATION [1](https://docs.snowflake.com/en/sql-reference/sql/create-external-access-integration)
+
+-- allow AccountAdmin to switch to the runtime role if needed
+GRANT ROLE IDENTIFIER($v_role) TO ROLE ACCOUNTADMIN;
+
+-- working context
+USE ROLE IDENTIFIER($v_role);
+USE DATABASE IDENTIFIER($v_db);
+USE SCHEMA   IDENTIFIER($v_schema);
+USE WAREHOUSE IDENTIFIER($v_wh);
 
 -- ========================================
--- STEP 1: Create Database and Warehouse
+-- STEP 2: Network Rule for External Access
 -- ========================================
-
-CREATE DATABASE IF NOT EXISTS SI_CYBERSECURITY_DB
-    COMMENT = 'CTF Intelligence Challenge Database';
-
-CREATE WAREHOUSE IF NOT EXISTS SI_CYBERSECURITY_WH
-    WAREHOUSE_SIZE = 'X-SMALL'
-    AUTO_SUSPEND = 60
-    AUTO_RESUME = TRUE
-    INITIALLY_SUSPENDED = TRUE
-    COMMENT = 'Warehouse for CTF data operations';
-
-USE DATABASE SI_CYBERSECURITY_DB;
-
-USE WAREHOUSE SI_CYBERSECURITY_WH;
+-- EGRESS + HOST_PORT is the correct pairing for outbound access to domains. [3](https://docs.snowflake.com/en/sql-reference/sql/create-network-rule)
+CREATE OR REPLACE NETWORK RULE IDENTIFIER($v_nr)
+  MODE       = EGRESS
+  TYPE       = HOST_PORT
+  VALUE_LIST = ( 'raw.githubusercontent.com', 'api.github.com' );
 
 -- ========================================
--- STEP 2: Create Network Rule for External Access
+-- STEP 3: (Optional) Secret for GitHub PAT (private repos or higher rate limits)
 -- ========================================
-
-CREATE OR REPLACE NETWORK RULE si_cybersecurity_github_network_rule
-    MODE = EGRESS
-    TYPE = HOST_PORT
-    VALUE_LIST = ('raw.githubusercontent.com');
-
--- ========================================
--- STEP 3: Create External Access Integration
--- ========================================
-
-CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION si_cybersecurity_github_external_access
-    ALLOWED_NETWORK_RULES = (si_cybersecurity_github_network_rule)
-    ENABLED = TRUE;
+-- Uncomment and set your PAT if needed; then include it in the EAI below. Secrets are schema-level objects referenced by EAI. [1](https://docs.snowflake.com/en/sql-reference/sql/create-external-access-integration)[2](https://docs.snowflake.cn/en/developer-guide/external-network-access/creating-using-external-network-access)
+-- CREATE OR REPLACE SECRET IDENTIFIER($v_db)||'.'||IDENTIFIER($v_schema)||'.'||IDENTIFIER($v_secret_name)
+--   TYPE = PASSWORD
+--   PASSWORD = '<your_personal_access_token>';
 
 -- ========================================
--- STEP 4: Create Tables
+-- STEP 4: External Access Integration (attach rule [+ secret])
 -- ========================================
+-- External access integrations aggregate allowed network rules (and optionally secrets) for UDF/Procedures. [1](https://docs.snowflake.com/en/sql-reference/sql/create-external-access-integration)
+CREATE OR REPLACE EXTERNAL ACCESS INTEGRATION IDENTIFIER($v_eai)
+  ALLOWED_NETWORK_RULES = ( $v_nr)
+  -- ALLOWED_AUTHENTICATION_SECRETS = ( IDENTIFIER($v_db)||'.'||IDENTIFIER($v_schema)||'.'||IDENTIFIER($v_secret_name) )  -- uncomment if secret created
+  ENABLED = TRUE;
 
+-- ensure the runtime role can reference the integration at run time (good hygiene)
+GRANT USAGE ON INTEGRATION IDENTIFIER($v_eai) TO ROLE IDENTIFIER($v_role);
+
+-- ========================================
+-- STEP 5: Tables
+-- ========================================
 CREATE OR REPLACE TABLE NETWORK_LOGS (
-    LOG_ID VARCHAR(100),
-    TIMESTAMP TIMESTAMP_NTZ,
-    SOURCE_IP VARCHAR(50),
-    DESTINATION_IP VARCHAR(50),
-    PORT INTEGER,
-    PROTOCOL VARCHAR(20),
-    BYTES_TRANSFERRED INTEGER,
-    USER_ID VARCHAR(100),
-    STATUS VARCHAR(20)
+  LOG_ID            VARCHAR(100),
+  TIMESTAMP         TIMESTAMP_NTZ,
+  SOURCE_IP         VARCHAR(50),
+  DESTINATION_IP    VARCHAR(50),
+  PORT              INTEGER,
+  PROTOCOL          VARCHAR(20),
+  BYTES_TRANSFERRED INTEGER,
+  USER_ID           VARCHAR(100),
+  STATUS            VARCHAR(20)
 );
 
 CREATE OR REPLACE TABLE QUERY_LOGS (
-    QUERY_ID VARCHAR(100),
-    TIMESTAMP TIMESTAMP_NTZ,
-    USER_ID VARCHAR(100),
-    USERNAME VARCHAR(100),
-    WAREHOUSE VARCHAR(50),
-    QUERY VARCHAR(5000),
-    DURATION_SECS FLOAT,
-    BYTES_SCANNED INTEGER,
-    STATUS VARCHAR(20),
-    ERROR_MESSAGE VARCHAR(5000)
+  QUERY_ID       VARCHAR(100),
+  TIMESTAMP      TIMESTAMP_NTZ,
+  USER_ID        VARCHAR(100),
+  USERNAME       VARCHAR(100),
+  WAREHOUSE      VARCHAR(50),
+  QUERY          VARCHAR(5000),
+  DURATION_SECS  FLOAT,
+  BYTES_SCANNED  INTEGER,
+  STATUS         VARCHAR(20),
+  ERROR_MESSAGE  VARCHAR(5000)
 );
 
 CREATE OR REPLACE TABLE SYSTEM_LOGS (
-    LOG_ID VARCHAR(100),
-    TIMESTAMP TIMESTAMP_NTZ,
-    USER_ID VARCHAR(100),
-    USERNAME VARCHAR(100),
-    ACTION VARCHAR(100),
-    DETAILS VARCHAR(5000),
-    STATUS VARCHAR(20)
+  LOG_ID      VARCHAR(100),
+  TIMESTAMP   TIMESTAMP_NTZ,
+  USER_ID     VARCHAR(100),
+  USERNAME    VARCHAR(100),
+  ACTION      VARCHAR(100),
+  DETAILS     VARCHAR(5000),
+  STATUS      VARCHAR(20)
 );
 
-
-
 -- ========================================
--- STEP 5: Create Python Stored Procedure (Optimized)
+-- STEP 6: Python Stored Procedure (pandas + requests)
 -- ========================================
-
+-- Uses Snowpark Session.write_pandas to bulk load DataFrames (overwrite table). [4](https://docs.snowflake.com/en/developer-guide/snowpark/reference/python/latest/snowpark/api/snowflake.snowpark.Session.write_pandas)[5](https://docs.snowflake.cn/en/developer-guide/snowpark/reference/python/latest/snowpark/api/snowflake.snowpark.Session.write_pandas)
 CREATE OR REPLACE PROCEDURE load_si_cybersecurity_data_from_github()
 RETURNS STRING
 LANGUAGE PYTHON
 RUNTIME_VERSION = '3.11'
 PACKAGES = ('snowflake-snowpark-python', 'pandas')
 HANDLER = 'load_data'
-EXTERNAL_ACCESS_INTEGRATIONS = (si_cybersecurity_github_external_access)
+EXTERNAL_ACCESS_INTEGRATIONS = ($v_eai)
 EXECUTE AS CALLER
 AS
 $$
@@ -104,10 +149,10 @@ def load_data(session):
     """
     
     # GitHub raw URLs for the CSV files
-    network_logs_url = "https://raw.githubusercontent.com/Snowflake-Labs/si-cybersecurity-challenge/main/data/network_logs.csv"
-    query_logs_url = "https://raw.githubusercontent.com/Snowflake-Labs/si-cybersecurity-challenge/main/data/query_logs.csv"
-    system_logs_url = "https://raw.githubusercontent.com/Snowflake-Labs/si-cybersecurity-challenge/main/data/system_logs.csv"
-    
+    network_logs_url = "https://raw.githubusercontent.com/snow2ocean/Cyber-Security-Detection-using-Snowflake-Intelligence/main/data/network_logs.csv"
+    query_logs_url = "https://raw.githubusercontent.com/snow2ocean/Cyber-Security-Detection-using-Snowflake-Intelligence/main/data/query_logs.csv"
+    system_logs_url = "https://raw.githubusercontent.com/snow2ocean/Cyber-Security-Detection-using-Snowflake-Intelligence/main/data/system_logs.csv"
+    # network_logs.csv
     results = []
     
     try:
@@ -190,16 +235,16 @@ def load_data(session):
     return "\n".join(results)
 $$;
 
--- ========================================
--- STEP 6: Execute the Data Load
--- ========================================
-
+-- execute the loader
 CALL load_si_cybersecurity_data_from_github();
 
 -- ========================================
--- STEP 7: Create Semantic Model
+-- STEP 7: Semantic View (YAML)
 -- ========================================
+-- Grant semantic view creation privilege (minimum) and SELECT on sources. [6](https://docs.snowflake.com/en/sql-reference/stored-procedures/system_create_semantic_view_from_yaml)
 
+
+-- Create semantic view from YAML (use dollar-quoted string for YAML) [6](https://docs.snowflake.com/en/sql-reference/stored-procedures/system_create_semantic_view_from_yaml)
 CALL SYSTEM$CREATE_SEMANTIC_VIEW_FROM_YAML(
   'SI_CYBERSECURITY_DB.PUBLIC',
   $$
